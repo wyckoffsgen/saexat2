@@ -1,6 +1,8 @@
 import { createContext, useContext, useEffect, useState, useCallback, useMemo, type ReactNode } from "react";
 import { useAdmins } from "./AdminsContext";
 import { useAudit } from "./AuditContext";
+import { useServerFn } from "@tanstack/react-start";
+import { setHotelState } from "@/lib/hotel-state.functions";
 
 export type UserRole = "superuser" | "director" | "admin" | "manager";
 
@@ -196,12 +198,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
   }, [user, log]);
 
-  const clearHistory = useCallback(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.removeItem(HISTORY_KEY);
-    window.dispatchEvent(new Event(HISTORY_EVENT));
-    setHistory([]);
-  }, []);
+ const setSharedState = useServerFn(setHotelState);
+
+const clearHistory = useCallback(() => {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(HISTORY_KEY);
+  window.dispatchEvent(new Event(HISTORY_EVENT));
+  setHistory([]);
+  void setSharedState({ data: { key: "auth-history", stateData: [] } }).catch(() => undefined);
+}, [setSharedState]);
 
   const value = useMemo(
     () => ({ user, ready, login, switchRole, logout, history, clearHistory }),

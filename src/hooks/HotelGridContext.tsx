@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useMemo, useState, useCallback, useEffect, useRef } from 'react';
+import { useServerFn } from '@tanstack/react-start';
 import { ROOM_CATEGORIES, ROOMS_PER_CATEGORY, type Room, type RoomCategory } from '@/types/hotel';
+import { getHotelState, setHotelState } from '@/lib/hotel-state.functions';
 
 export interface CategoryDef {
   id: string;
@@ -51,6 +53,14 @@ function loadPersisted(): PersistedState | null {
   }
 }
 
+const EMPTY_STATE: PersistedState = {
+  extraCategories: [],
+  removedCategoryIds: [],
+  removedRoomNumbers: [],
+  extraRooms: [],
+  categoryRates: {},
+};
+
 export function HotelGridProvider({ children }: { children: React.ReactNode }) {
   const baseCategories = useMemo<CategoryDef[]>(
     () =>
@@ -74,7 +84,53 @@ export function HotelGridProvider({ children }: { children: React.ReactNode }) {
   const [extraRooms, setExtraRooms] = useState<Room[]>(initial.current?.extraRooms ?? []);
   const [categoryRates, setCategoryRates] = useState<Record<string, number>>(initial.current?.categoryRates ?? {});
 
-  // Default rooms generated from base categories.
+  const getSharedState = useServerFn(getHotelState);
+  const setSharedState = useServerFn(setHotelState);
+  const cloudWriteRef = useRef<number | null>(null);
+  const lastCloudVersionRef = useRef(0);
+  const skipNextPersist = useRef(false);
+
+  // Load from Supabase on mount
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    let cancelled = false;
+    const loadCloud = async () => {
+      try {
+        const row = await getSharedState({ data: { key: 'grid' } });
+        if (cancelled) return;
+        if (row?.stateData && typeof row.stateData === 'object' && !Array.isArray(row.stateData)) {
+          if (row.version <= lastCloudVersionRef.current) return;
+          lastCloudVersionRef.current = row.version;
+          const data = row.stateData as PersistedState;
+          const safe: PersistedState = {
+            extraCategories: Array.isArray(data.extraCategories) ? data.extraCategories : [],
+            removedCategoryIds: Array.isArray(data.removedCategoryIds) ? data.removedCategoryIds : [],
+            removedRoomNumbers: Array.isArray(data.removedRoomNumbers) ? data.removedRoomNumbers : [],
+            extraRooms: Array.isArray(data.extraRooms) ? data.extraRooms : [],
+            categoryRates: data.categoryRates ?? {},
+          };
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
+          skipNextPersist.current = true;
+          setExtraCategories(safe.extraCategories);
+          setRemovedCategoryIds(new Set(safe.removedCategoryIds));
+          setRemovedRoomNumbers(new Set(safe.removedRoomNumbers));
+          setExtraRooms(safe.extraRooms);
+          setCategoryRates(safe.categoryRates ?? {});
+        } else {
+          // Push local to cloud if cloud is empty
+          const local = loadPersisted();
+          if (local) {
+            await setSharedState({ data: { key: 'grid', stateData: local } });
+          } else {
+            await setSharedState({ data: { key: 'grid', stateData: EMPTY_STATE } });
+          }
+        }
+      } catch { /* keep local */ }
+    };
+    loadCloud();
+    return () => { cancelled = true; };
+  }, []);
+
   const baseRooms = useMemo<Room[]>(() => {
     const rooms: Room[] = [];
     let floor = 1;
@@ -87,9 +143,7 @@ export function HotelGridProvider({ children }: { children: React.ReactNode }) {
     return rooms;
   }, []);
 
-  const skipNextPersist = useRef(false);
-
-  // Persist on every change so other roles/tabs see the same data.
+  // Persist to localStorage + Supabase on every change
   useEffect(() => {
     if (typeof window === 'undefined') return;
     if (skipNextPersist.current) {
@@ -105,9 +159,17 @@ export function HotelGridProvider({ children }: { children: React.ReactNode }) {
     };
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
     window.dispatchEvent(new Event(CHANGE_EVENT));
+    // Debounced Supabase write
+    if (cloudWriteRef.current) window.clearTimeout(cloudWriteRef.current);
+    cloudWriteRef.current = window.setTimeout(() => {
+      void setSharedState({ data: { key: 'grid', stateData: payload } }).then((row) => {
+        lastCloudVersionRef.current = row.version;
+        cloudWriteRef.current = null;
+      }).catch(() => undefined);
+    }, 300);
   }, [extraCategories, removedCategoryIds, removedRoomNumbers, extraRooms, categoryRates]);
 
-  // Cross-tab/same-tab sync: when another window or component writes, re-hydrate.
+  // Cross-tab sync
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const reload = () => {
@@ -120,9 +182,7 @@ export function HotelGridProvider({ children }: { children: React.ReactNode }) {
       setExtraRooms(data.extraRooms);
       setCategoryRates(data.categoryRates ?? {});
     };
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY) reload();
-    };
+    const onStorage = (e: StorageEvent) => { if (e.key === STORAGE_KEY) reload(); };
     window.addEventListener('storage', onStorage);
     window.addEventListener(CHANGE_EVENT, reload as EventListener);
     return () => {

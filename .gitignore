@@ -16,6 +16,13 @@ dist-ssr
 .nitro
 *.local
 
+# Environment variables — NEVER commit these
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+
 # Wrangler / Cloudflare
 .wrangler/
 .dev.vars
