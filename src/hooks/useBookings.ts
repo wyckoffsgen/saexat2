@@ -114,30 +114,52 @@ export function useBookings() {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(seed));
   }, []);
 
-  useEffect(() => {
+useEffect(() => {
     if (typeof window === 'undefined') return;
+
+    const applyCloudBookings = (stateData: unknown, version: number) => {
+      if (version <= lastCloudVersionRef.current || cloudWriteRef.current) return;
+      lastCloudVersionRef.current = version;
+      const next = normalizeBookings(stateData);
+      setBookings(next);
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      window.dispatchEvent(new Event(CHANGE_EVENT));
+    };
+
+    // Initial load
     let cancelled = false;
     const loadCloud = async () => {
       try {
         const row = await getSharedState({ data: { key: 'bookings' } });
         if (cancelled) return;
         if (row?.stateData) {
-          if (row.version <= lastCloudVersionRef.current || cloudWriteRef.current) return;
-          lastCloudVersionRef.current = row.version;
-          const next = normalizeBookings(row.stateData);
-          setBookings(next);
-          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-          window.dispatchEvent(new Event(CHANGE_EVENT));
-          return;
+          applyCloudBookings(row.stateData, row.version);
+        } else {
+          const local = normalizeBookings(JSON.parse(window.localStorage.getItem(STORAGE_KEY) || 'null'));
+          await setSharedState({ data: { key: 'bookings', stateData: local } });
         }
-        const local = normalizeBookings(JSON.parse(window.localStorage.getItem(STORAGE_KEY) || 'null'));
-        const seed = local.length ? local : [];
-        await setSharedState({ data: { key: 'bookings', stateData: seed } });
-      } catch { /* keep local state if backend is temporarily unreachable */ }
+      } catch { /* keep local */ }
     };
     loadCloud();
-    const id = window.setInterval(loadCloud, 2000);
-    return () => { cancelled = true; window.clearInterval(id); };
+
+    // Real-time subscription
+    import('@/integrations/supabase/client').then(({ supabase }) => {
+      if (cancelled) return;
+      const channel = supabase
+        .channel('hotel-bookings-realtime')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'hotel_app_state', filter: 'state_key=eq.bookings' },
+          (payload) => {
+            const row = payload.new as { state_data: unknown; version: number } | undefined;
+            if (row) applyCloudBookings(row.state_data, row.version);
+          },
+        )
+        .subscribe();
+      return () => { supabase.removeChannel(channel); };
+    });
+
+    return () => { cancelled = true; };
   }, [getSharedState, setSharedState]);
 
   // Re-evaluate auto-checkout periodically so day-rollovers flip statuses live.

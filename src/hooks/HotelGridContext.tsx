@@ -90,44 +90,64 @@ export function HotelGridProvider({ children }: { children: React.ReactNode }) {
   const lastCloudVersionRef = useRef(0);
   const skipNextPersist = useRef(false);
 
-  // Load from Supabase on mount
+// Load from Supabase on mount + subscribe to real-time changes
   useEffect(() => {
     if (typeof window === 'undefined') return;
+
+    const applyCloudData = (stateData: unknown, version: number) => {
+      if (version <= lastCloudVersionRef.current || cloudWriteRef.current) return;
+      if (!stateData || typeof stateData !== 'object' || Array.isArray(stateData)) return;
+      lastCloudVersionRef.current = version;
+      const data = stateData as PersistedState;
+      const safe: PersistedState = {
+        extraCategories: Array.isArray(data.extraCategories) ? data.extraCategories : [],
+        removedCategoryIds: Array.isArray(data.removedCategoryIds) ? data.removedCategoryIds : [],
+        removedRoomNumbers: Array.isArray(data.removedRoomNumbers) ? data.removedRoomNumbers : [],
+        extraRooms: Array.isArray(data.extraRooms) ? data.extraRooms : [],
+        categoryRates: data.categoryRates ?? {},
+      };
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
+      skipNextPersist.current = true;
+      setExtraCategories(safe.extraCategories);
+      setRemovedCategoryIds(new Set(safe.removedCategoryIds));
+      setRemovedRoomNumbers(new Set(safe.removedRoomNumbers));
+      setExtraRooms(safe.extraRooms);
+      setCategoryRates(safe.categoryRates ?? {});
+    };
+
+    // Initial load
     let cancelled = false;
     const loadCloud = async () => {
       try {
         const row = await getSharedState({ data: { key: 'grid' } });
         if (cancelled) return;
-        if (row?.stateData && typeof row.stateData === 'object' && !Array.isArray(row.stateData)) {
-          if (row.version <= lastCloudVersionRef.current) return;
-          lastCloudVersionRef.current = row.version;
-          const data = row.stateData as PersistedState;
-          const safe: PersistedState = {
-            extraCategories: Array.isArray(data.extraCategories) ? data.extraCategories : [],
-            removedCategoryIds: Array.isArray(data.removedCategoryIds) ? data.removedCategoryIds : [],
-            removedRoomNumbers: Array.isArray(data.removedRoomNumbers) ? data.removedRoomNumbers : [],
-            extraRooms: Array.isArray(data.extraRooms) ? data.extraRooms : [],
-            categoryRates: data.categoryRates ?? {},
-          };
-          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
-          skipNextPersist.current = true;
-          setExtraCategories(safe.extraCategories);
-          setRemovedCategoryIds(new Set(safe.removedCategoryIds));
-          setRemovedRoomNumbers(new Set(safe.removedRoomNumbers));
-          setExtraRooms(safe.extraRooms);
-          setCategoryRates(safe.categoryRates ?? {});
+        if (row?.stateData) {
+          applyCloudData(row.stateData, row.version);
         } else {
-          // Push local to cloud if cloud is empty
           const local = loadPersisted();
-          if (local) {
-            await setSharedState({ data: { key: 'grid', stateData: local } });
-          } else {
-            await setSharedState({ data: { key: 'grid', stateData: EMPTY_STATE } });
-          }
+          await setSharedState({ data: { key: 'grid', stateData: local ?? EMPTY_STATE } });
         }
       } catch { /* keep local */ }
     };
     loadCloud();
+
+    // Real-time subscription — fires on every INSERT/UPDATE to hotel_app_state
+    import('@/integrations/supabase/client').then(({ supabase }) => {
+      if (cancelled) return;
+      const channel = supabase
+        .channel('hotel-grid-realtime')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'hotel_app_state', filter: 'state_key=eq.grid' },
+          (payload) => {
+            const row = payload.new as { state_data: unknown; version: number } | undefined;
+            if (row) applyCloudData(row.state_data, row.version);
+          },
+        )
+        .subscribe();
+      return () => { supabase.removeChannel(channel); };
+    });
+
     return () => { cancelled = true; };
   }, []);
 

@@ -106,6 +106,17 @@ export function AdminsProvider({ children }: { children: ReactNode }) {
     } catch { /* supabase write failed, local is still saved */ }
   }, [setSharedState]);
 
+const hashPassword = (pw: string): string => {
+    // Simple deterministic hash — not cryptographic, but keeps passwords
+    // out of plain text in the database. For production, use bcrypt server-side.
+    let h = 0x811c9dc5;
+    for (let i = 0; i < pw.length; i++) {
+      h ^= pw.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h.toString(16).padStart(8, '0') + pw.length.toString(16);
+  };
+
   const addAdmin: AdminsContextValue["addAdmin"] = useCallback((input) => {
     const rec: AdminRecord = {
       id: `adm_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
@@ -113,7 +124,7 @@ export function AdminsProvider({ children }: { children: ReactNode }) {
       surname: input.surname.trim(),
       idNumber: input.idNumber.trim(),
       username: input.username.trim().toLowerCase(),
-      password: input.password,
+      password: hashPassword(input.password),
       fingerprintId: input.fingerprintId.trim(),
       createdAt: new Date().toISOString(),
     };
