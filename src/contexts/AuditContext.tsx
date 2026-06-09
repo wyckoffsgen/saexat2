@@ -1,35 +1,19 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useServerFn } from "@tanstack/react-start";
+import { getHotelState, setHotelState } from "@/lib/hotel-state.functions";
 import type { UserRole } from "./AuthContext";
 
-/**
- * AuditContext — captures every meaningful user action (creation, deletion,
- * edit, login/logout, shift change, etc.). NOT scrolling, hovering, or
- * passive viewing.
- *
- * Persisted in localStorage with cross-tab sync so superuser sees admin
- * actions instantly.
- */
 export interface AuditEvent {
   id: string;
-  at: string; // ISO
+  at: string;
   actor: {
     username: string;
     role: UserRole;
-    /** AdminRecord.id when actor is an admin signed in via the registry. */
     adminId?: string | null;
   };
-  category:
-    | "auth"
-    | "booking"
-    | "admin"
-    | "shift"
-    | "form"
-    | "system";
-  /** Short verb-noun action label, e.g. "booking.created", "admin.deleted". */
+  category: "auth" | "booking" | "admin" | "shift" | "form" | "system";
   action: string;
-  /** One-line human summary. */
   summary: string;
-  /** Optional structured details (room, fields changed, etc.). */
   details?: Record<string, unknown>;
 }
 
@@ -58,13 +42,39 @@ export function AuditProvider({ children }: { children: ReactNode }) {
   const [events, setEvents] = useState<AuditEvent[]>(() => load());
   const ref = useRef<AuditEvent[]>(events);
   ref.current = events;
+  const cloudWriteRef = useRef<number | null>(null);
+  const getSharedState = useServerFn(getHotelState);
+  const setSharedState = useServerFn(setHotelState);
+
+  // Load from Supabase on mount
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let cancelled = false;
+    const loadCloud = async () => {
+      try {
+        const row = await getSharedState({ data: { key: "audit" } });
+        if (cancelled) return;
+        if (row?.stateData && Array.isArray(row.stateData) && row.stateData.length > 0) {
+          const cloudEvents = row.stateData as AuditEvent[];
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudEvents));
+          ref.current = cloudEvents;
+          setEvents(cloudEvents);
+        } else {
+          const local = load();
+          if (local.length > 0) {
+            await setSharedState({ data: { key: "audit", stateData: local } });
+          }
+        }
+      } catch { /* keep local */ }
+    };
+    loadCloud();
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     const reload = () => setEvents(load());
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY) reload();
-    };
+    const onStorage = (e: StorageEvent) => { if (e.key === STORAGE_KEY) reload(); };
     window.addEventListener("storage", onStorage);
     window.addEventListener(CHANGE_EVENT, reload as EventListener);
     return () => {
@@ -85,7 +95,13 @@ export function AuditProvider({ children }: { children: ReactNode }) {
     setEvents(next);
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
     window.dispatchEvent(new Event(CHANGE_EVENT));
-  }, []);
+    // Debounced write to Supabase (500ms so rapid actions batch together)
+    if (cloudWriteRef.current) window.clearTimeout(cloudWriteRef.current);
+    cloudWriteRef.current = window.setTimeout(() => {
+      void setSharedState({ data: { key: "audit", stateData: ref.current } }).catch(() => undefined);
+      cloudWriteRef.current = null;
+    }, 500);
+  }, [setSharedState]);
 
   const clear = useCallback(() => {
     if (typeof window === "undefined") return;
@@ -93,7 +109,8 @@ export function AuditProvider({ children }: { children: ReactNode }) {
     setEvents([]);
     window.localStorage.removeItem(STORAGE_KEY);
     window.dispatchEvent(new Event(CHANGE_EVENT));
-  }, []);
+    void setSharedState({ data: { key: "audit", stateData: [] } }).catch(() => undefined);
+  }, [setSharedState]);
 
   const value = useMemo(() => ({ events, log, clear }), [events, log, clear]);
   return <AuditContext.Provider value={value}>{children}</AuditContext.Provider>;

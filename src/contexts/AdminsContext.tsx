@@ -1,16 +1,14 @@
 import { createContext, useContext, useEffect, useState, useCallback, useMemo, type ReactNode } from "react";
+import { useServerFn } from "@tanstack/react-start";
+import { getHotelState, setHotelState } from "@/lib/hotel-state.functions";
 
 export interface AdminRecord {
   id: string;
   name: string;
   surname: string;
-  /** National / personal ID number entered by superuser. */
   idNumber: string;
-  /** Login username unique per admin. */
   username: string;
-  /** Per-admin password — used to sign into the shared admin panel. */
   password: string;
-  /** Visual-only fingerprint identifier (e.g. "FP-7A21-4C09"). */
   fingerprintId: string;
   createdAt: string;
 }
@@ -22,7 +20,6 @@ interface AdminsContextValue {
   addAdmin: (input: AdminInput) => AdminRecord;
   updateAdmin: (id: string, patch: Partial<AdminInput>) => void;
   removeAdmin: (id: string) => void;
-  /** Look up an admin by login username (case-insensitive). */
   findByUsername: (username: string) => AdminRecord | undefined;
 }
 
@@ -35,7 +32,6 @@ function load(): AdminRecord[] {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const list = JSON.parse(raw) as Partial<AdminRecord>[];
-    // Backfill new fields for older records so we don't crash old registries.
     return list.map((a) => ({
       id: a.id ?? `adm_${Math.random().toString(36).slice(2, 9)}`,
       name: a.name ?? "",
@@ -51,7 +47,7 @@ function load(): AdminRecord[] {
   }
 }
 
-function save(list: AdminRecord[]) {
+function saveLocal(list: AdminRecord[]) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
   window.dispatchEvent(new Event(CHANGE_EVENT));
@@ -61,13 +57,39 @@ const AdminsContext = createContext<AdminsContextValue | undefined>(undefined);
 
 export function AdminsProvider({ children }: { children: ReactNode }) {
   const [admins, setAdmins] = useState<AdminRecord[]>(() => load());
+  const getSharedState = useServerFn(getHotelState);
+  const setSharedState = useServerFn(setHotelState);
 
+  // Load from Supabase on mount, merge with localStorage
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let cancelled = false;
+    const loadCloud = async () => {
+      try {
+        const row = await getSharedState({ data: { key: "admins" } });
+        if (cancelled) return;
+        if (row?.stateData && Array.isArray(row.stateData) && row.stateData.length > 0) {
+          const cloudList = row.stateData as AdminRecord[];
+          saveLocal(cloudList);
+          setAdmins(cloudList);
+        } else {
+          // Push existing localStorage admins to Supabase if cloud is empty
+          const local = load();
+          if (local.length > 0) {
+            await setSharedState({ data: { key: "admins", stateData: local } });
+          }
+        }
+      } catch { /* keep local state */ }
+    };
+    loadCloud();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Cross-tab sync
   useEffect(() => {
     if (typeof window === "undefined") return;
     const reload = () => setAdmins(load());
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY) reload();
-    };
+    const onStorage = (e: StorageEvent) => { if (e.key === STORAGE_KEY) reload(); };
     window.addEventListener("storage", onStorage);
     window.addEventListener(CHANGE_EVENT, reload as EventListener);
     return () => {
@@ -75,6 +97,14 @@ export function AdminsProvider({ children }: { children: ReactNode }) {
       window.removeEventListener(CHANGE_EVENT, reload as EventListener);
     };
   }, []);
+
+  const persistAll = useCallback(async (list: AdminRecord[]) => {
+    saveLocal(list);
+    setAdmins(list);
+    try {
+      await setSharedState({ data: { key: "admins", stateData: list } });
+    } catch { /* supabase write failed, local is still saved */ }
+  }, [setSharedState]);
 
   const addAdmin: AdminsContextValue["addAdmin"] = useCallback((input) => {
     const rec: AdminRecord = {
@@ -88,30 +118,23 @@ export function AdminsProvider({ children }: { children: ReactNode }) {
       createdAt: new Date().toISOString(),
     };
     const next = [rec, ...load()];
-    save(next);
-    setAdmins(next);
+    void persistAll(next);
     return rec;
-  }, []);
+  }, [persistAll]);
 
   const updateAdmin: AdminsContextValue["updateAdmin"] = useCallback((id, patch) => {
     const next = load().map((a) =>
       a.id === id
-        ? {
-            ...a,
-            ...patch,
-            username: patch.username ? patch.username.trim().toLowerCase() : a.username,
-          }
+        ? { ...a, ...patch, username: patch.username ? patch.username.trim().toLowerCase() : a.username }
         : a,
     );
-    save(next);
-    setAdmins(next);
-  }, []);
+    void persistAll(next);
+  }, [persistAll]);
 
   const removeAdmin: AdminsContextValue["removeAdmin"] = useCallback((id) => {
     const next = load().filter((a) => a.id !== id);
-    save(next);
-    setAdmins(next);
-  }, []);
+    void persistAll(next);
+  }, [persistAll]);
 
   const findByUsername = useCallback(
     (username: string) => {

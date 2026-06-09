@@ -65,6 +65,12 @@ function pushHistory(ev: Omit<LoginEvent, "id">) {
   const capped = list.slice(0, 500);
   window.localStorage.setItem(HISTORY_KEY, JSON.stringify(capped));
   window.dispatchEvent(new Event(HISTORY_EVENT));
+  // Fire-and-forget cloud sync — import via dynamic to avoid circular deps
+  import("@tanstack/react-start").then(({ callServerFn }) => {
+    import("@/lib/hotel-state.functions").then(({ setHotelState }) => {
+      void callServerFn(setHotelState, { data: { key: "auth-history", stateData: capped } }).catch(() => undefined);
+    });
+  }).catch(() => undefined);
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
