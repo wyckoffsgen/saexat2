@@ -47,53 +47,15 @@ export default function Login() {
     }, 380);
   };
 
-  /**
-   * Trigger the BROWSER'S native biometric prompt via WebAuthn. The browser
-   * (and OS) own the permission dialog — we don't render one ourselves.
-   * Whatever the user does in the native prompt, we resolve and reflect it
-   * inside the fingerprint button itself.
-   */
-const beginFingerprint = async () => {
-  if (scanStage !== "idle") return;
-  setError(null);
-
-  const hasWebAuthn =
-    typeof window !== "undefined" &&
-    !!window.PublicKeyCredential &&
-    !!navigator.credentials;
-
-  if (!hasWebAuthn) {
-    setError("Fingerprint login requires a device with biometric authentication.");
-    return;
-  }
-
-  setScanStage("scanning");
-
-  try {
-    const challenge = new Uint8Array(32);
-    crypto.getRandomValues(challenge);
-    await navigator.credentials.get({
-      publicKey: {
-        challenge,
-        timeout: 30000,
-        userVerification: "required",
-        rpId: window.location.hostname,
-      },
-    } as CredentialRequestOptions);
-
-    // WebAuthn succeeded — still require the user to type their username/password.
-    // The fingerprint only proves device presence, not identity in this system.
-    setScanStage("success");
-    window.setTimeout(() => setScanStage("idle"), 1600);
-  } catch {
-    setScanStage("denied");
-    window.setTimeout(() => setScanStage("idle"), 1600);
-  }
-};
-
-    // No WebAuthn? Fall back gracefully — still simulate a scan in-button only.
-    const hasWebAuthn = typeof window !== "undefined" && !!window.PublicKeyCredential && !!navigator.credentials;
+  const beginFingerprint = async () => {
+    if (scanStage !== "idle") return;
+    setError(null);
     setScanStage("scanning");
+
+    const hasWebAuthn =
+      typeof window !== "undefined" &&
+      !!window.PublicKeyCredential &&
+      !!navigator.credentials;
 
     const completeSuccess = () => {
       const matched = admins[0] ?? null;
@@ -115,9 +77,6 @@ const beginFingerprint = async () => {
     }
 
     try {
-      // This call triggers the browser's NATIVE biometric / security-key prompt
-      // (Touch ID, Windows Hello, Android fingerprint, etc.) — which is exactly
-      // the OS-level "permission" the user is asked for.
       const challenge = new Uint8Array(32);
       crypto.getRandomValues(challenge);
       await navigator.credentials.get({
@@ -130,7 +89,6 @@ const beginFingerprint = async () => {
       } as CredentialRequestOptions);
       completeSuccess();
     } catch {
-      // User dismissed / blocked the native prompt, or no authenticator available.
       completeDenied();
     }
   };
