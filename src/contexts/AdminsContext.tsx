@@ -60,20 +60,26 @@ export function AdminsProvider({ children }: { children: ReactNode }) {
   const getSharedState = useServerFn(getHotelState);
   const setSharedState = useServerFn(setHotelState);
 
-  // Load from Supabase on mount, merge with localStorage
+  // ─── Load from Supabase on mount + REAL-TIME subscription ───────────────
   useEffect(() => {
     if (typeof window === "undefined") return;
     let cancelled = false;
+
+    const applyCloud = (stateData: unknown) => {
+      if (!Array.isArray(stateData) || stateData.length === 0) return;
+      const cloudList = stateData as AdminRecord[];
+      saveLocal(cloudList);
+      setAdmins(cloudList);
+    };
+
+    // Initial load from Supabase
     const loadCloud = async () => {
       try {
         const row = await getSharedState({ data: { key: "admins" } });
         if (cancelled) return;
         if (row?.stateData && Array.isArray(row.stateData) && row.stateData.length > 0) {
-          const cloudList = row.stateData as AdminRecord[];
-          saveLocal(cloudList);
-          setAdmins(cloudList);
+          applyCloud(row.stateData);
         } else {
-          // Push existing localStorage admins to Supabase if cloud is empty
           const local = load();
           if (local.length > 0) {
             await setSharedState({ data: { key: "admins", stateData: local } });
@@ -82,10 +88,28 @@ export function AdminsProvider({ children }: { children: ReactNode }) {
       } catch { /* keep local state */ }
     };
     loadCloud();
-    return () => { cancelled = true; };
-  }, []);
 
-  // Cross-tab sync
+    // ── Real-time subscription: fires instantly when any other user writes ──
+    import("@/integrations/supabase/client").then(({ supabase }) => {
+      if (cancelled) return;
+      const channel = supabase
+        .channel("hotel-admins-realtime")
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "hotel_app_state", filter: "state_key=eq.admins" },
+          (payload) => {
+            const row = payload.new as { state_data: unknown } | undefined;
+            if (row) applyCloud(row.state_data);
+          },
+        )
+        .subscribe();
+      return () => { supabase.removeChannel(channel); };
+    });
+
+    return () => { cancelled = true; };
+  }, [getSharedState, setSharedState]);
+
+  // ─── Cross-tab sync (same browser, different tabs) ───────────────────────
   useEffect(() => {
     if (typeof window === "undefined") return;
     const reload = () => setAdmins(load());
@@ -106,15 +130,13 @@ export function AdminsProvider({ children }: { children: ReactNode }) {
     } catch { /* supabase write failed, local is still saved */ }
   }, [setSharedState]);
 
-const hashPassword = (pw: string): string => {
-    // Simple deterministic hash — not cryptographic, but keeps passwords
-    // out of plain text in the database. For production, use bcrypt server-side.
+  const hashPassword = (pw: string): string => {
     let h = 0x811c9dc5;
     for (let i = 0; i < pw.length; i++) {
       h ^= pw.charCodeAt(i);
       h = Math.imul(h, 0x01000193) >>> 0;
     }
-    return h.toString(16).padStart(8, '0') + pw.length.toString(16);
+    return h.toString(16).padStart(8, "0") + pw.length.toString(16);
   };
 
   const addAdmin: AdminsContextValue["addAdmin"] = useCallback((input) => {

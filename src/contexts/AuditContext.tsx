@@ -43,22 +43,34 @@ export function AuditProvider({ children }: { children: ReactNode }) {
   const ref = useRef<AuditEvent[]>(events);
   ref.current = events;
   const cloudWriteRef = useRef<number | null>(null);
+  const lastCloudVersionRef = useRef(0);
   const getSharedState = useServerFn(getHotelState);
   const setSharedState = useServerFn(setHotelState);
 
-  // Load from Supabase on mount
+  // ─── Load from Supabase on mount + REAL-TIME subscription ───────────────
   useEffect(() => {
     if (typeof window === "undefined") return;
     let cancelled = false;
+
+    const applyCloud = (stateData: unknown, version?: number) => {
+      // Don't overwrite while we are mid-write (our own pending debounce)
+      if (cloudWriteRef.current) return;
+      if (version !== undefined && version <= lastCloudVersionRef.current) return;
+      if (!Array.isArray(stateData) || stateData.length === 0) return;
+      if (version !== undefined) lastCloudVersionRef.current = version;
+      const cloudEvents = stateData as AuditEvent[];
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudEvents));
+      ref.current = cloudEvents;
+      setEvents(cloudEvents);
+    };
+
+    // Initial load from Supabase
     const loadCloud = async () => {
       try {
         const row = await getSharedState({ data: { key: "audit" } });
         if (cancelled) return;
         if (row?.stateData && Array.isArray(row.stateData) && row.stateData.length > 0) {
-          const cloudEvents = row.stateData as AuditEvent[];
-          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudEvents));
-          ref.current = cloudEvents;
-          setEvents(cloudEvents);
+          applyCloud(row.stateData, row.version);
         } else {
           const local = load();
           if (local.length > 0) {
@@ -68,9 +80,28 @@ export function AuditProvider({ children }: { children: ReactNode }) {
       } catch { /* keep local */ }
     };
     loadCloud();
-    return () => { cancelled = true; };
-  }, []);
 
+    // ── Real-time subscription: audit log updates pushed from other users ───
+    import("@/integrations/supabase/client").then(({ supabase }) => {
+      if (cancelled) return;
+      const channel = supabase
+        .channel("hotel-audit-realtime")
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "hotel_app_state", filter: "state_key=eq.audit" },
+          (payload) => {
+            const row = payload.new as { state_data: unknown; version: number } | undefined;
+            if (row) applyCloud(row.state_data, row.version);
+          },
+        )
+        .subscribe();
+      return () => { supabase.removeChannel(channel); };
+    });
+
+    return () => { cancelled = true; };
+  }, [getSharedState, setSharedState]);
+
+  // ─── Cross-tab sync (same browser, different tabs) ───────────────────────
   useEffect(() => {
     if (typeof window === "undefined") return;
     const reload = () => setEvents(load());
@@ -95,10 +126,12 @@ export function AuditProvider({ children }: { children: ReactNode }) {
     setEvents(next);
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
     window.dispatchEvent(new Event(CHANGE_EVENT));
-    // Debounced write to Supabase (500ms so rapid actions batch together)
+    // Debounced write to Supabase — batches rapid actions together
     if (cloudWriteRef.current) window.clearTimeout(cloudWriteRef.current);
     cloudWriteRef.current = window.setTimeout(() => {
-      void setSharedState({ data: { key: "audit", stateData: ref.current } }).catch(() => undefined);
+      void setSharedState({ data: { key: "audit", stateData: ref.current } })
+        .then((row) => { lastCloudVersionRef.current = row.version; })
+        .catch(() => undefined);
       cloudWriteRef.current = null;
     }, 500);
   }, [setSharedState]);

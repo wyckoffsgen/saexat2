@@ -53,9 +53,43 @@ export default function Login() {
    * Whatever the user does in the native prompt, we resolve and reflect it
    * inside the fingerprint button itself.
    */
-  const beginFingerprint = async () => {
-    if (scanStage !== "idle") return;
-    setError(null);
+const beginFingerprint = async () => {
+  if (scanStage !== "idle") return;
+  setError(null);
+
+  const hasWebAuthn =
+    typeof window !== "undefined" &&
+    !!window.PublicKeyCredential &&
+    !!navigator.credentials;
+
+  if (!hasWebAuthn) {
+    setError("Fingerprint login requires a device with biometric authentication.");
+    return;
+  }
+
+  setScanStage("scanning");
+
+  try {
+    const challenge = new Uint8Array(32);
+    crypto.getRandomValues(challenge);
+    await navigator.credentials.get({
+      publicKey: {
+        challenge,
+        timeout: 30000,
+        userVerification: "required",
+        rpId: window.location.hostname,
+      },
+    } as CredentialRequestOptions);
+
+    // WebAuthn succeeded — still require the user to type their username/password.
+    // The fingerprint only proves device presence, not identity in this system.
+    setScanStage("success");
+    window.setTimeout(() => setScanStage("idle"), 1600);
+  } catch {
+    setScanStage("denied");
+    window.setTimeout(() => setScanStage("idle"), 1600);
+  }
+};
 
     // No WebAuthn? Fall back gracefully — still simulate a scan in-button only.
     const hasWebAuthn = typeof window !== "undefined" && !!window.PublicKeyCredential && !!navigator.credentials;
